@@ -41,7 +41,15 @@ COLORS = {
     "run": "#0969da",    # running
     "wait": "#9a6700",   # queued
     "muted": "#6e7781",  # cancelled / skipped
+    "warn": "#bc4c00",   # compiled fine, only publish/release failed
 }
+
+# Jobs or steps whose name contains one of these words are treated as
+# "publish" work. If only those fail, the build itself still counts as passed.
+# Edit "publish_keywords" in ~/.gethub_watchdog.json to change the list.
+PUBLISH_KEYWORDS = ["release", "publish", "deploy", "pages", "upload",
+                    "notify", "announce", "docker push"]
+BAD = ("failure", "timed_out")
 
 
 # ----------------------------------------------------------------- helpers
@@ -98,6 +106,54 @@ def status_of(obj):
     if st == "in_progress":
         return ("▶ running", "run")
     return (f"⏳ {st}", "wait")  # queued / waiting / pending / requested
+
+
+def is_publish(name, kws):
+    n = (name or "").lower()
+    return any(k in n for k in kws)
+
+
+def failed_as_publish(job, kws):
+    """True if this failed job only failed in publish/release work."""
+    if is_publish(job.get("name"), kws):
+        return True
+    bad = [s for s in job.get("steps") or [] if s.get("conclusion") in BAD]
+    return bool(bad) and all(is_publish(s.get("name"), kws) for s in bad)
+
+
+def item_status(obj, kws, parent_publish=False):
+    """Status for a job or step, marking publish-only failures in orange."""
+    if obj.get("conclusion") in BAD:
+        if "steps" in obj:
+            pub = failed_as_publish(obj, kws)
+        else:
+            pub = parent_publish or is_publish(obj.get("name"), kws)
+        if pub:
+            return ("⚠ publish failed", "warn")
+    return status_of(obj)
+
+
+def verdict(run, jobs, kws):
+    """(text, colour tag, kind) for a run. kind: running/pass/publish/fail/other."""
+    if run.get("status") != "completed":
+        t, g = status_of(run)
+        return t, g, "running"
+    c = run.get("conclusion")
+    if c == "success":
+        return "✔ passed", "ok", "pass"
+    if c not in BAD or jobs is None:
+        t, g = status_of(run)
+        return t, g, ("fail" if g == "bad" else "other")
+    real = pub = False
+    for j in jobs:
+        if j.get("conclusion") in BAD:
+            if failed_as_publish(j, kws):
+                pub = True
+            else:
+                real = True
+    if pub and not real:
+        return "✔ built · publish ✖", "warn", "publish"
+    return "✖ failed", "bad", "fail"
 
 
 def run_span(r):
@@ -173,9 +229,12 @@ class GitHub:
 class Watcher(threading.Thread):
     """Polls GitHub in the background and posts results to a queue."""
 
-    def __init__(self, repo, token, branch, interval, out_q):
+    def __init__(self, repo, token, branch, interval, out_q, kws):
         super().__init__(daemon=True)
         self.repo, self.branch, self.interval, self.q = repo, branch, interval, out_q
+        self.kws = kws
+        self.seen_active = set()    # run ids seen running (to detect "just finished")
+        self.done_jobs = {}         # run id -> jobs, for finished runs that did not pass
         self.gh = GitHub(token)
         self.pinned = None          # run id the user clicked, or None = follow newest
         self.hist = {}              # workflow_id -> history estimate cache
@@ -217,12 +276,38 @@ class Watcher(threading.Thread):
         jobs, hist = [], None
         if target:
             jobs = self.gh.get(f"{base}/runs/{target['id']}/jobs", {"per_page": 100}).get("jobs", [])
+            if target.get("status") == "completed":
+                self.done_jobs[target["id"]] = jobs
             try:
                 hist = self.history(target["workflow_id"])
             except Exception:
                 hist = None
+
+        check = list(runs)
+        if target and all(r["id"] != target["id"] for r in check):
+            check.append(target)
+        finished, fetched = [], 0
+        for r in check:
+            rid = r["id"]
+            if r.get("status") != "completed":
+                self.seen_active.add(rid)
+                continue
+            just_done = rid in self.seen_active
+            # failed runs need their jobs to tell a compile failure from a publish failure
+            needs = r.get("conclusion") in BAD and rid not in self.done_jobs
+            if needs and (just_done or fetched < 3):
+                try:
+                    self.done_jobs[rid] = self.gh.get(f"{base}/runs/{rid}/jobs",
+                                                      {"per_page": 100}).get("jobs", [])
+                    fetched += 1
+                except Exception:
+                    pass
+            if just_done:
+                self.seen_active.discard(rid)
+                finished.append(r)
         return {"repo": self.repo, "runs": runs, "target": target, "jobs": jobs,
-                "hist": hist, "remaining": self.gh.remaining, "at": time.time()}
+                "hist": hist, "finished": finished, "done_jobs": dict(self.done_jobs),
+                "remaining": self.gh.remaining, "at": time.time()}
 
     def history(self, wid):
         """Median durations from recent successful runs of the same workflow."""
@@ -319,7 +404,7 @@ class App:
         self.watcher = None
         self.alarm = Alarm()
         self.data = None
-        self.seen_active = {}
+        self.kws = [k.lower() for k in self.cfg.get("publish_keywords", PUBLISH_KEYWORDS) if k]
         self.shown_run = None
         self.auto_opened = set()
         self.last_ok = None
@@ -390,7 +475,7 @@ class App:
         ttk.Checkbutton(lh, text="Follow newest", variable=self.follow_v,
                         command=self.on_follow).pack(side="right")
         self.runs_tv = ttk.Treeview(left, columns=("wf", "status", "time"), show="headings", selectmode="browse")
-        for col, txt, w in (("wf", "Workflow", 170), ("status", "Status", 95), ("time", "Time", 60)):
+        for col, txt, w in (("wf", "Workflow", 150), ("status", "Status", 140), ("time", "Time", 62)):
             self.runs_tv.heading(col, text=txt)
             self.runs_tv.column(col, width=w, anchor="w" if col != "time" else "e")
         self.runs_tv.pack(fill="both", expand=True, pady=(4, 0))
@@ -446,7 +531,7 @@ class App:
         self.jobs_tv = ttk.Treeview(jf, columns=("status", "start", "dur", "eta"), show="tree headings")
         self.jobs_tv.heading("#0", text="Job / step")
         self.jobs_tv.column("#0", width=330)
-        for col, txt, w in (("status", "Status", 110), ("start", "Started", 100),
+        for col, txt, w in (("status", "Status", 128), ("start", "Started", 100),
                             ("dur", "Duration", 80), ("eta", "Estimate", 140)):
             self.jobs_tv.heading(col, text=txt)
             self.jobs_tv.column(col, width=w, anchor="w")
@@ -488,13 +573,12 @@ class App:
         self.interval_v.set(str(iv))
         self.repo_v.set(repo)
         self.cfg.update(repo=repo, branch=self.branch_v.get().strip(), token=token,
-                        interval=iv, sound=self.sound_v.get())
+                        interval=iv, sound=self.sound_v.get(), publish_keywords=self.kws)
         save_cfg(self.cfg)
 
-        self.seen_active.clear()
         self.data = None
         self.follow_v.set(True)
-        self.watcher = Watcher(repo, token, self.branch_v.get().strip(), iv, self.q)
+        self.watcher = Watcher(repo, token, self.branch_v.get().strip(), iv, self.q, self.kws)
         self.watcher.start()
         self.start_btn.config(text="■  Stop watching")
         self.title_l.config(text=f"Connecting to {repo}…")
@@ -560,16 +644,8 @@ class App:
     def on_data(self, d):
         self.data = d
         self.last_ok = time.time()
-        check = list(d["runs"])
-        t = d["target"]
-        if t and all(r["id"] != t["id"] for r in check):
-            check.append(t)
-        for r in check:
-            if r.get("status") != "completed":
-                self.seen_active[r["id"]] = r
-            elif r["id"] in self.seen_active:
-                self.seen_active.pop(r["id"])
-                self.build_done(r)
+        for r in d.get("finished") or []:
+            self.build_done(r)
         self.fill_runs()
         self.refresh_live()
         self.update_statusbar()
@@ -596,11 +672,19 @@ class App:
             self.root.after(1000, self.tick)
 
     # ---------- rendering
+    def run_verdict(self, r):
+        d = self.data or {}
+        jobs = (d.get("done_jobs") or {}).get(r["id"])
+        t = d.get("target")
+        if jobs is None and t and t["id"] == r["id"] and r.get("status") == "completed":
+            jobs = d.get("jobs")
+        return verdict(r, jobs, self.kws)
+
     def fill_runs(self):
         tv = self.runs_tv
         tv.delete(*tv.get_children())
         for r in self.data["runs"]:
-            txt, tag = status_of(r)
+            txt, tag, _ = self.run_verdict(r)
             tv.insert("", "end", iid=str(r["id"]),
                       values=(f"{r.get('name', 'workflow')} #{r.get('run_number')}", txt, self.run_time(r)),
                       tags=(tag,))
@@ -641,7 +725,7 @@ class App:
             return
 
         hist = d.get("hist") or {}
-        txt, tag = status_of(t)
+        txt, tag, kind = self.run_verdict(t)
         attempt = t.get("run_attempt") or 1
         self.title_l.config(text=f"{t.get('name', 'workflow')}  #{t.get('run_number')}"
                                  + (f"  (attempt {attempt})" if attempt > 1 else ""))
@@ -667,6 +751,8 @@ class App:
         if not running:
             remaining, done_at, frac = "done", local_clock(e), 1.0
             note = f"Finished in {fmt_dur(elapsed)}."
+            if kind == "publish":
+                note += "  Everything compiled — only the publish / release step failed."
         elif queued:
             remaining = "waiting for runner"
             done_at = local_clock(now() + timedelta(seconds=typical)) if typical else "—"
@@ -707,8 +793,8 @@ class App:
             return f"usually {fmt_dur(est)}"
         return f"≈ {fmt_dur(est)}"
 
-    def row_vals(self, obj, est):
-        txt, tag = status_of(obj)
+    def row_vals(self, obj, est, parent_publish=False):
+        txt, tag = item_status(obj, self.kws, parent_publish)
         s, e = item_span(obj)
         dur = ((e or now()) - s).total_seconds() if s else None
         return (txt, local_clock(s) if s else "—", fmt_dur(dur), self.est_text(obj, est)), tag
@@ -728,9 +814,10 @@ class App:
             jid = f"j{j['id']}"
             vals, tag = self.row_vals(j, hist.get("jobs", {}).get(j["name"]))
             want.append((jid, "", j["name"], vals, tag))
+            jpub = is_publish(j.get("name"), self.kws)
             for stp in j.get("steps") or []:
                 sid = f"{jid}s{stp['number']}"
-                svals, stag = self.row_vals(stp, hist.get("steps", {}).get((j["name"], stp["name"])))
+                svals, stag = self.row_vals(stp, hist.get("steps", {}).get((j["name"], stp["name"])), jpub)
                 want.append((sid, jid, stp["name"], svals, stag))
 
         existing = set()
@@ -764,6 +851,9 @@ class App:
         rs, re_ = run_span(t)
         if not rs:
             return
+        # a re-run keeps jobs from the earlier attempt, so start the axis at the earliest job
+        starts = [item_span(j)[0] for j in jobs]
+        rs = min([rs] + [x for x in starts if x])
         W = max(c.winfo_width(), 400)
         label_w, pad_r, row_h, top = 200, 70, 22, 28
         cur = re_ or now()
@@ -800,7 +890,7 @@ class App:
             y = top + i * row_h
             name = j["name"] if len(j["name"]) <= 28 else j["name"][:27] + "…"
             c.create_text(8, y + row_h / 2, text=name, anchor="w", font=("Segoe UI", 9))
-            txt, tag = status_of(j)
+            txt, tag = item_status(j, self.kws)
             s, e = item_span(j)
             if not s:
                 c.create_text(label_w + 4, y + row_h / 2, text="queued…", anchor="w",
@@ -835,15 +925,16 @@ class App:
 
     # ---------- completion
     def build_done(self, r):
-        ok = r.get("conclusion") == "success"
+        txt, tag, kind = self.run_verdict(r)
+        built = kind in ("pass", "publish")
         s, e = run_span(r)
         dur = (e - s).total_seconds() if s and e else None
         if self.sound_v.get():
-            self.alarm.start(ok)
-        self.root.title(f"{APP} — {'✔ passed' if ok else '✖ ' + str(r.get('conclusion'))}")
-        self.popup(r, ok, dur, e)
+            self.alarm.start(built)
+        self.root.title(f"{APP} — {txt}")
+        self.popup(r, kind, dur, e)
 
-    def popup(self, r, ok, dur, end):
+    def popup(self, r, kind, dur, end):
         w = tk.Toplevel(self.root)
         w.title("Build finished")
         w.resizable(False, False)
@@ -851,13 +942,20 @@ class App:
             w.attributes("-topmost", True)
         except tk.TclError:
             pass
-        color = COLORS["ok"] if ok else COLORS["bad"]
-        head = "✔  BUILD PASSED" if ok else f"✖  BUILD {str(r.get('conclusion', 'failed')).upper()}"
+        if kind == "pass":
+            color, head, extra = COLORS["ok"], "✔  BUILD PASSED", ""
+        elif kind == "publish":
+            color, head = COLORS["warn"], "✔  BUILD PASSED"
+            extra = "\nThe code compiled. Only the publish / release step failed."
+        else:
+            color = COLORS["bad"] if kind == "fail" else COLORS["muted"]
+            head = f"✖  BUILD {str(r.get('conclusion', 'failed')).upper().replace('_', ' ')}"
+            extra = ""
         tk.Label(w, text=head, font=("Segoe UI", 20, "bold"), fg="white", bg=color,
                  padx=40, pady=18).pack(fill="x")
         ttk.Label(w, padding=16, justify="center", text=(
             f"{r.get('name')}  #{r.get('run_number')}  on  {r.get('head_branch')}\n"
-            f"Finished in {fmt_dur(dur)} at {local_clock(end)}")).pack()
+            f"Finished in {fmt_dur(dur)} at {local_clock(end)}{extra}")).pack()
 
         def close():
             self.alarm.stop()

@@ -9,6 +9,8 @@ A desktop app that watches your GitHub Actions builds live — any language, any
 - **Jobs & steps**: every step with its start time, duration and time left
 - **Alarm**: when a build it saw running finishes, a pop-up appears on top of your other windows and a sound repeats (rising tones = passed, falling tones = failed) until you press **Stop alarm** (it stops by itself after 60 seconds)
 
+**Compile failures vs. publish failures.** GitHub marks a whole run as failed if any job fails, even when the code compiled fine and only a release/publish job broke. WatchDog checks which jobs failed: if only publish-type work failed (a job or step whose name contains *release, publish, deploy, pages, upload, notify, announce* or *docker push*), it reports **✔ built · publish ✖** in orange, plays the success sound and says the code compiled. A real compile or test failure is still shown in red. You can change the word list under `"publish_keywords"` in the settings file.
+
 Time estimates come from the median of the last 10 successful builds of the same workflow, so they appear once a workflow has passed at least once.
 
 ## Run it
