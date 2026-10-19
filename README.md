@@ -1,0 +1,32 @@
+# GetHub WatchDog
+
+A desktop app that watches your GitHub Actions builds live — any language, any compiler (gcc, clang, MSVC, javac, rustc, Go, .NET, Node…), because it watches the build service itself rather than a specific compiler.
+
+## What it shows
+- **Recent builds** for the repository, with pass / fail / running status
+- **Elapsed time**, **typical build time**, **time to completion** and the **clock time it will be done**
+- **Build flow** timeline: each job as a bar, with a dashed outline showing how long that job usually takes, a red "now" line and a purple "expected finish" line
+- **Jobs & steps**: every step with its start time, duration and time left
+- **Alarm**: when a build it saw running finishes, a pop-up appears on top of your other windows and a sound repeats (rising tones = passed, falling tones = failed) until you press **Stop alarm** (it stops by itself after 60 seconds)
+
+Time estimates come from the median of the last 10 successful builds of the same workflow, so they appear once a workflow has passed at least once.
+
+## Run it
+1. Install Python 3.9 or newer from https://python.org (on Windows, tick "Add Python to PATH"; tkinter is included).
+2. Double-click `gethub_watchdog.py`, or run `python gethub_watchdog.py`.
+3. Enter the repository as `owner/name` (or paste its GitHub URL) and press **Start watching**.
+
+## Token (recommended)
+Without a token GitHub allows only 60 requests an hour, so the app checks every 2 minutes. With a token it can check every few seconds.
+
+Create one at GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained token**, give it access to your repository with **Actions: Read-only** permission, and paste it into the Token box. For private repositories a token is required.
+
+Your settings (including the token) are saved on your computer in `~/.gethub_watchdog.json` (on Windows: `C:\Users\<you>\.gethub_watchdog.json`).
+
+## Make a Windows .exe (optional)
+Double-click `build_windows_exe.bat`. It installs PyInstaller and produces `dist\GetHubWatchDog.exe`, which runs without opening a console window.
+
+## Tips
+- **Follow newest** keeps the view on the latest running build. Click any build in the list to pin it instead.
+- **Test alarm** plays the sound so you can check your volume.
+- **Branch** limits the list to one branch (leave blank for all).
