@@ -29,7 +29,16 @@ Time estimates come from the median of the last 10 successful builds of the same
 Both are the same app. The standalone version is rebuilt from `gethub_watchdog.py` and test-launched on Windows automatically every time the app changes, so the two always match.
 
 ## Portable version (no Python needed)
-For a USB stick, a laptop while traveling, or a library PC: download `portable/GetHubWatchDog.exe` from this repository (or **GetHubWatchDog-Portable.zip** from the Releases page), put it anywhere (e.g. your USB stick) and double-click it. Nothing is installed and nothing is written to the PC — settings, including the token if "Remember token on this drive" is ticked, are kept in `GetHubWatchDog-settings.json` next to the .exe. The portable app is rebuilt and test-launched on Windows automatically each time the app changes. If Windows says "Windows protected your PC", click **More info → Run anyway** (the app isn't code-signed).
+For a USB stick, a laptop while traveling, or a library PC: download `portable/GetHubWatchDog.exe` from this repository (or **GetHubWatchDog-Portable.zip** from the Releases page), put it anywhere (e.g. your USB stick) and double-click it. Nothing is installed and nothing is written to the PC — settings are kept in `GetHubWatchDog-settings.json` next to the .exe. If Windows says "Windows protected your PC", click **More info → Run anyway** (the app isn't code-signed).
+
+## Saved repos and the passcode vault
+Keep as many repositories as you like, each with its own token and branch, and switch between them from **Saved repos** at the top.
+- Fill in a repository, branch and token, then press **Save**. The first time, you choose a passcode (at least 4 digits).
+- Each time the app opens it asks for the passcode. **Lock** hides everything again; **Change passcode** sets a new one.
+- Everything in the vault — tokens *and* repository names — is encrypted in the settings file. Tokens are never saved anywhere else.
+- After **10 wrong passcodes in a row** the app erases the vault. **Forgot passcode…** also erases it so you can start over (your tokens still work on GitHub; paste them again).
+
+**How safe is a 4-digit passcode?** It stops anyone who finds your stick and opens the app. Someone who copies the settings file and runs their own cracking program isn't limited to 10 tries, though: each guess is made deliberately slow (about a second and 128 MB of memory), but 4 digits is only 10,000 guesses, so a determined person could still get in within hours. For more protection use a longer passcode (6–8 digits or a few words) — and either way, use read-only tokens and delete them at github.com/settings/tokens if you lose the stick.
 
 ## Run it from Python
 1. Install Python 3.9 or newer from https://python.org (on Windows, tick "Add Python to PATH"; tkinter is included).

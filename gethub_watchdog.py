@@ -13,6 +13,9 @@ Only uses the Python standard library (tkinter + urllib). Run with:
     python gethub_watchdog.py
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import queue
@@ -34,7 +37,7 @@ from tkinter import filedialog, messagebox, ttk
 
 APP = "GetHub WatchDog"
 API = "https://api.github.com"
-VERSION = "1.3"
+VERSION = "1.4"
 
 
 def _app_dir():
@@ -243,11 +246,69 @@ def load_cfg():
         return {}
 
 
+# ----------------------------------------------------------------- locked vault
+# Saved repositories and tokens are kept encrypted in the settings file.
+# Passcode -> scrypt (deliberately slow, ~1 s and 128 MB per try) -> two keys.
+# Encryption: HMAC-SHA256 in counter mode; integrity: HMAC-SHA256 tag
+# (encrypt-then-MAC). Standard library only, so the Python version needs nothing extra.
+VAULT_N = 2 ** 17
+MAX_TRIES = 10            # wrong passcodes in a row before the vault is erased
+
+
+def _b64(b):
+    return base64.b64encode(b).decode("ascii")
+
+
+def _kdf(pin, salt, n=VAULT_N):
+    k = hashlib.scrypt(pin.encode("utf-8"), salt=salt, n=n, r=8, p=1,
+                       maxmem=512 * 1024 * 1024, dklen=64)
+    return k[:32], k[32:]
+
+
+def _keystream(key, nonce, length):
+    out, i = bytearray(), 0
+    while len(out) < length:
+        out += hmac.new(key, nonce + i.to_bytes(8, "big"), hashlib.sha256).digest()
+        i += 1
+    return bytes(out[:length])
+
+
+def vault_keys(pin, salt=None):
+    salt = salt or os.urandom(16)
+    ek, mk = _kdf(pin, salt)
+    return {"salt": salt, "ek": ek, "mk": mk}
+
+
+def vault_seal(profiles, keys):
+    nonce = os.urandom(16)
+    pt = json.dumps(profiles).encode("utf-8")
+    ct = bytes(a ^ b for a, b in zip(pt, _keystream(keys["ek"], nonce, len(pt))))
+    head = f"gwd-vault-1:{VAULT_N}".encode()
+    tag = hmac.new(keys["mk"], head + keys["salt"] + nonce + ct, hashlib.sha256).digest()
+    return {"v": 1, "n": VAULT_N, "salt": _b64(keys["salt"]), "nonce": _b64(nonce),
+            "data": _b64(ct), "tag": _b64(tag)}
+
+
+def vault_open(v, pin):
+    """Returns (profiles, keys). Raises ValueError for a wrong passcode."""
+    salt, nonce = base64.b64decode(v["salt"]), base64.b64decode(v["nonce"])
+    ct, tag = base64.b64decode(v["data"]), base64.b64decode(v["tag"])
+    n = int(v.get("n", VAULT_N))
+    ek, mk = _kdf(pin, salt, n)
+    head = f"gwd-vault-{v.get('v', 1)}:{n}".encode()
+    if not hmac.compare_digest(tag, hmac.new(mk, head + salt + nonce + ct, hashlib.sha256).digest()):
+        raise ValueError("wrong passcode")
+    pt = bytes(a ^ b for a, b in zip(ct, _keystream(ek, nonce, len(ct))))
+    return json.loads(pt.decode("utf-8")), {"salt": salt, "ek": ek, "mk": mk}
+
+
 def save_cfg(cfg):
     """Returns False if the settings could not be written (e.g. read-only drive)."""
     data = dict(cfg)
-    if not data.get("remember_token", True):
-        data.pop("token", None)
+    if data.get("vault"):                      # never keep plain copies next to a vault
+        for k in ("repo", "branch", "token"):
+            data.pop(k, None)
+    data.pop("remember_token", None)
     try:
         with open(CFG_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -515,9 +576,15 @@ class App:
         self.shown_run = None
         self.auto_opened = set()
         self.log_cache = {}         # job id -> parsed log
+        self.profiles = []          # saved repos: {"repo", "branch", "token"} (only while unlocked)
+        self.vkeys = None           # vault keys while unlocked
         self.last_ok = None
         self.build_ui()
         root.after(200, self.drain)
+        if self.cfg.get("vault") and "--selftest" not in sys.argv:
+            root.after(300, self.unlock)
+        elif self.cfg.get("token") and "--selftest" not in sys.argv:
+            root.after(300, self.offer_protect)
         root.after(1000, self.tick)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -537,6 +604,23 @@ class App:
         st.configure("TProgressbar", background="#0969da", troughcolor="#eaeef2",
                      bordercolor="#d0d7de", lightcolor="#0969da", darkcolor="#0969da", thickness=14)
 
+        # --- saved repositories (locked vault)
+        pb = ttk.Frame(r, padding=(10, 8, 10, 0))
+        pb.pack(fill="x")
+        ttk.Label(pb, text="Saved repos", style="H.TLabel").pack(side="left")
+        self.prof_v = tk.StringVar()
+        self.prof_cb = ttk.Combobox(pb, textvariable=self.prof_v, state="readonly", width=44)
+        self.prof_cb.pack(side="left", padx=(8, 8))
+        self.prof_cb.bind("<<ComboboxSelected>>", self.on_profile)
+        self.vbtn = {}
+        for key, txt, cmd in (("save", "Save", self.save_profile), ("del", "Remove", self.delete_profile),
+                              ("lock", "Lock", self.lock), ("pin", "Change passcode", self.change_pin)):
+            b = ttk.Button(pb, text=txt, command=cmd)
+            b.pack(side="left", padx=(0, 6))
+            self.vbtn[key] = b
+        self.vault_l = ttk.Label(pb, text="", style="Cap.TLabel")
+        self.vault_l.pack(side="left", padx=(8, 0))
+
         # --- top controls
         top = ttk.Frame(r, padding=(10, 8))
         top.pack(fill="x")
@@ -546,7 +630,6 @@ class App:
         self.interval_v = tk.StringVar(value=str(self.cfg.get("interval", 5)))
         self.follow_v = tk.BooleanVar(value=True)
         self.sound_v = tk.BooleanVar(value=self.cfg.get("sound", True))
-        self.keep_token_v = tk.BooleanVar(value=self.cfg.get("remember_token", True))
 
         fields = [
             ("Repository (owner/name or URL)", self.repo_v, 30, None),
@@ -565,15 +648,13 @@ class App:
         self.start_btn.grid(row=1, column=4, padx=(0, 12))
         ttk.Checkbutton(top, text="Alarm sound", variable=self.sound_v).grid(row=1, column=5, padx=(0, 8))
         ttk.Button(top, text="Test alarm", command=self.test_alarm).grid(row=1, column=6)
-        ttk.Checkbutton(top, text="Remember token" + (" on this drive" if PORTABLE else ""),
-                        variable=self.keep_token_v, command=self.on_keep_token).grid(
-            row=2, column=2, sticky="w", pady=(3, 0))
 
         # --- status bar (packed before the panes so it stays visible)
         self.sb = ttk.Label(r, anchor="w", padding=(10, 3), style="Cap.TLabel",
                             text="Enter a repository and press Start."
                                  + ("   ·   Portable mode: settings are saved next to the app, not on this PC."
                                     if PORTABLE else ""))
+        self.refresh_vault_ui()
         self.sb.pack(fill="x", side="bottom")
 
         pw = ttk.Panedwindow(r, orient="horizontal")
@@ -688,10 +769,11 @@ class App:
             note = "  (No token: GitHub allows only 60 requests/hour, so checking every 2 min. Add a token for live updates.)"
         self.interval_v.set(str(iv))
         self.repo_v.set(repo)
-        self.cfg.update(repo=repo, branch=self.branch_v.get().strip(), token=token,
-                        remember_token=self.keep_token_v.get(),
-                        interval=iv, sound=self.sound_v.get(), publish_keywords=self.kws)
+        self.cfg.update(interval=iv, sound=self.sound_v.get(), publish_keywords=self.kws)
+        if not self.cfg.get("vault"):
+            self.cfg.pop("token", None)        # tokens are only ever saved inside the vault
         save_cfg(self.cfg)
+        self.update_saved_token(repo, self.branch_v.get().strip(), token)
 
         self.data = None
         self.follow_v.set(True)
@@ -722,9 +804,184 @@ class App:
         self.watcher.poke()
         self.set_status("Loading selected build…")
 
-    def on_keep_token(self):
-        self.cfg["remember_token"] = self.keep_token_v.get()
-        save_cfg(self.cfg)
+    # ---------- saved repos / vault
+    @staticmethod
+    def profile_label(p):
+        return p["repo"] + (f"  [{p['branch']}]" if p.get("branch") else "")
+
+    def refresh_vault_ui(self, select=None):
+        has_vault = bool(self.cfg.get("vault"))
+        unlocked = self.vkeys is not None
+        labels = [self.profile_label(p) for p in self.profiles]
+        self.prof_cb.config(values=labels)
+        if select is not None and select in labels:
+            self.prof_v.set(select)
+        elif self.prof_v.get() not in labels:
+            self.prof_v.set("")
+        if not has_vault:
+            txt = "Press Save to keep this repo and token in a passcode-locked vault."
+        elif not unlocked:
+            txt = "Locked."
+        else:
+            txt = f"Unlocked · {len(self.profiles)} saved"
+        self.vault_l.config(text=txt)
+        self.vbtn["save"].config(text="Unlock" if has_vault and not unlocked else "Save")
+        for k in ("del", "lock", "pin"):
+            self.vbtn[k].state(["!disabled"] if unlocked else ["disabled"])
+
+    def write_vault(self):
+        self.cfg["vault"] = vault_seal(self.profiles, self.vkeys)
+        for k in ("repo", "branch", "token"):
+            self.cfg.pop(k, None)
+        if not save_cfg(self.cfg):
+            messagebox.showwarning(APP, "Couldn't save to this drive (it may be read-only). "
+                                        "Your saved repos will be lost when you close the app.")
+
+    def unlock(self):
+        v = self.cfg.get("vault")
+        if not v:
+            return True
+        if self.vkeys is not None:
+            return True
+
+        def check(pin):
+            try:
+                profiles, keys = vault_open(v, pin)
+            except ValueError:
+                fails = int(self.cfg.get("vault_fails", 0)) + 1
+                if fails >= MAX_TRIES:
+                    self.cfg.pop("vault", None)
+                    self.cfg["vault_fails"] = 0
+                    save_cfg(self.cfg)
+                    dlg.action = "wiped"
+                    dlg.w.after(10, dlg.w.destroy)
+                    return "Too many wrong passcodes."
+                self.cfg["vault_fails"] = fails
+                save_cfg(self.cfg)
+                left = MAX_TRIES - fails
+                return ("Wrong passcode." + (f"  {left} {'try' if left == 1 else 'tries'} left before the vault is erased."
+                                             if left <= 7 else ""))
+            except Exception as e:
+                return f"The vault could not be read ({e})."
+            self.profiles, self.vkeys = profiles, keys
+            self.cfg["vault_fails"] = 0
+            save_cfg(self.cfg)
+            return None
+
+        dlg = PasscodeDialog(self.root, "Unlock GetHub WatchDog",
+                             "Enter your passcode to unlock your saved repositories and tokens.")
+        dlg.check = check
+        pin = dlg.wait()
+        if dlg.action == "wiped":
+            self.profiles, self.vkeys = [], None
+            messagebox.showwarning(APP, f"{MAX_TRIES} wrong passcodes in a row, so the vault was erased "
+                                        "to protect your tokens. Nothing else was changed.")
+        elif dlg.action == "reset":
+            self.cfg.pop("vault", None)
+            self.cfg["vault_fails"] = 0
+            save_cfg(self.cfg)
+            self.profiles, self.vkeys = [], None
+            self.set_status("Vault erased. Paste a token and press Save to make a new one.")
+        self.refresh_vault_ui()
+        if pin and self.profiles:
+            self.prof_v.set(self.profile_label(self.profiles[0]))
+            self.on_profile()
+        return pin is not None
+
+    def offer_protect(self):
+        """Older versions saved the token as plain text. Offer to lock it away."""
+        if messagebox.askyesno(APP, "Your token is saved on this drive without protection.\n\n"
+                                    "Lock it in a passcode-protected vault now?"):
+            self.save_profile()
+        else:
+            self.cfg.pop("token", None)
+            save_cfg(self.cfg)
+            self.set_status("The unprotected copy of your token was removed. Press Save to keep it in the vault.")
+
+    def new_vault(self):
+        dlg = PasscodeDialog(self.root, "Create a passcode",
+                             "Choose a passcode. You'll need it each time you open GetHub WatchDog "
+                             "to use your saved repositories and tokens.", mode="new")
+        pin = dlg.wait()
+        if not pin:
+            return False
+        self.root.config(cursor="watch")
+        self.root.update()
+        self.vkeys = vault_keys(pin)
+        self.root.config(cursor="")
+        self.profiles = []
+        return True
+
+    def save_profile(self):
+        if self.cfg.get("vault") and self.vkeys is None:
+            self.unlock()
+            return
+        repo = normalize_repo(self.repo_v.get())
+        if not repo:
+            messagebox.showerror(APP, "Enter a repository first (owner/name).")
+            return
+        if self.vkeys is None and not self.new_vault():
+            return
+        p = {"repo": repo, "branch": self.branch_v.get().strip(),
+             "token": "".join(self.token_v.get().split())}
+        self.profiles = [x for x in self.profiles
+                         if (x["repo"].lower(), x.get("branch", "")) != (repo.lower(), p["branch"])]
+        self.profiles.append(p)
+        self.profiles.sort(key=lambda x: self.profile_label(x).lower())
+        self.write_vault()
+        self.refresh_vault_ui(select=self.profile_label(p))
+        self.set_status(f"Saved {repo} in your locked vault.")
+
+    def update_saved_token(self, repo, branch, token):
+        if self.vkeys is None:
+            return
+        for p in self.profiles:
+            if (p["repo"].lower(), p.get("branch", "")) == (repo.lower(), branch) and p.get("token") != token:
+                p["token"] = token
+                self.write_vault()
+
+    def on_profile(self, _e=None):
+        p = next((x for x in self.profiles if self.profile_label(x) == self.prof_v.get()), None)
+        if not p:
+            return
+        if self.watcher:
+            self.stop_watch()
+        self.repo_v.set(p["repo"])
+        self.branch_v.set(p.get("branch", ""))
+        self.token_v.set(p.get("token", ""))
+        self.set_status(f"Loaded {p['repo']}. Press Start watching.")
+
+    def delete_profile(self):
+        label = self.prof_v.get()
+        if not label or self.vkeys is None:
+            return
+        if not messagebox.askyesno(APP, f"Remove {label} from your saved repos?"):
+            return
+        self.profiles = [x for x in self.profiles if self.profile_label(x) != label]
+        self.write_vault()
+        self.refresh_vault_ui()
+
+    def lock(self):
+        if self.watcher:
+            self.stop_watch()
+        self.profiles, self.vkeys = [], None
+        self.token_v.set("")
+        self.repo_v.set("")
+        self.branch_v.set("")
+        self.refresh_vault_ui()
+        self.set_status("Locked. Your saved repos and tokens are hidden until you enter the passcode.")
+        self.unlock()
+
+    def change_pin(self):
+        if self.vkeys is None:
+            return
+        dlg = PasscodeDialog(self.root, "Change passcode", "Enter a new passcode.", mode="new")
+        pin = dlg.wait()
+        if not pin:
+            return
+        self.vkeys = vault_keys(pin)
+        self.write_vault()
+        self.set_status("Passcode changed.")
 
     def current_token(self):
         return "".join(self.token_v.get().split())
@@ -768,7 +1025,7 @@ class App:
         self.alarm.stop()
         if self.watcher:
             self.watcher.stop()
-        self.cfg.update(sound=self.sound_v.get(), remember_token=self.keep_token_v.get())
+        self.cfg.update(sound=self.sound_v.get())
         save_cfg(self.cfg)
         self.root.destroy()
 
@@ -1134,6 +1391,94 @@ class App:
             pass
 
 
+class PasscodeDialog:
+    """Modal passcode prompt. mode: 'unlock', 'new' (enter twice) or 'confirm'."""
+
+    def __init__(self, parent, title, message, mode="unlock", note=""):
+        self.result = None
+        self.action = None
+        w = self.w = tk.Toplevel(parent)
+        w.title(title)
+        w.resizable(False, False)
+        w.transient(parent)
+        f = ttk.Frame(w, padding=18)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text=message, wraplength=360, justify="left").pack(anchor="w")
+        self.p1, self.p2 = tk.StringVar(), tk.StringVar()
+        ttk.Label(f, text="Passcode", style="Cap.TLabel").pack(anchor="w", pady=(12, 0))
+        e1 = ttk.Entry(f, textvariable=self.p1, show="•", width=24, font=("Segoe UI", 14))
+        e1.pack(anchor="w")
+        if mode == "new":
+            ttk.Label(f, text="Type it again", style="Cap.TLabel").pack(anchor="w", pady=(8, 0))
+            e2 = ttk.Entry(f, textvariable=self.p2, show="•", width=24, font=("Segoe UI", 14))
+            e2.pack(anchor="w")
+            e2.bind("<Return>", lambda _e: self.ok())
+            note = note or ("At least 4 digits. A longer code (6–8 digits, or a few words) "
+                            "is much harder to crack if someone copies your drive.")
+        else:
+            e1.bind("<Return>", lambda _e: self.ok())
+        self.msg = ttk.Label(f, text=note, style="Cap.TLabel", wraplength=360, justify="left")
+        self.msg.pack(anchor="w", pady=(8, 0))
+        self.mode = mode
+        b = ttk.Frame(f)
+        b.pack(fill="x", pady=(14, 0))
+        ttk.Button(b, text="Unlock" if mode == "unlock" else "OK", command=self.ok).pack(side="right")
+        ttk.Button(b, text="Cancel" if mode != "unlock" else "Skip for now",
+                   command=self.cancel).pack(side="right", padx=6)
+        if mode == "unlock":
+            ttk.Button(b, text="Forgot passcode…", command=self.forgot).pack(side="left")
+        w.protocol("WM_DELETE_WINDOW", self.cancel)
+        w.update_idletasks()
+        try:
+            px = parent.winfo_rootx() + (parent.winfo_width() - w.winfo_width()) // 2
+            py = parent.winfo_rooty() + (parent.winfo_height() - w.winfo_height()) // 3
+            w.geometry(f"+{max(px, 0)}+{max(py, 0)}")
+        except tk.TclError:
+            pass
+        self.check = None          # set by caller for unlock: pin -> error text or None
+        e1.focus_set()
+        w.grab_set()
+
+    def set_message(self, text, error=False):
+        self.msg.config(text=text, foreground=COLORS["bad"] if error else "#6e7781")
+
+    def ok(self):
+        pin = self.p1.get()
+        if self.mode == "new":
+            if len(pin) < 4:
+                return self.set_message("Use at least 4 characters (for example 4 digits).", True)
+            if pin != self.p2.get():
+                return self.set_message("The two passcodes don't match. Try again.", True)
+        if not pin:
+            return
+        if self.check:
+            self.set_message("Checking…")
+            self.w.config(cursor="watch")
+            self.w.update()
+            err = self.check(pin)
+            self.w.config(cursor="")
+            if err:
+                self.p1.set("")
+                return self.set_message(err, True)
+        self.result = pin
+        self.w.destroy()
+
+    def cancel(self):
+        self.w.destroy()
+
+    def forgot(self):
+        if messagebox.askyesno(APP, "Without the passcode your saved repositories and tokens "
+                               "can't be recovered.\n\nErase the vault and start again? "
+                               "(Your tokens still work on GitHub — you can paste them again.)",
+                               icon="warning", parent=self.w):
+            self.action = "reset"
+            self.w.destroy()
+
+    def wait(self):
+        self.w.wait_window()
+        return self.result
+
+
 class LogWindow:
     """Shows the GitHub log for a job, focused on the step that failed."""
 
@@ -1420,8 +1765,16 @@ def main():
     if "--selftest" in sys.argv:              # used by the automated Windows build check
         def check():
             out = os.path.join(_app_dir(), "selftest-result.txt")
+            k = vault_keys("1234")
+            v = vault_seal([{"repo": "a/b", "token": "t"}], k)
+            ok = vault_open(v, "1234")[0][0]["token"] == "t"
+            try:
+                vault_open(v, "9999")
+                ok = False
+            except ValueError:
+                pass
             with open(out, "w", encoding="utf-8") as f:
-                f.write(f"ok {VERSION} portable={PORTABLE} cfg={CFG_PATH} sound={bool(play_once)}\n")
+                f.write(f"{'ok' if ok else 'VAULT-FAILED'} {VERSION} portable={PORTABLE} cfg={CFG_PATH}\n")
             root.destroy()
         root.after(1500, check)
         app.sound_v.set(False)

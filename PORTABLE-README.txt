@@ -16,20 +16,27 @@ SET UP
      (or paste the repository's GitHub address).
   2. Token: paste your GitHub token (starts with github_pat_ or ghp_).
      It needs "Actions: Read-only" permission.
-  3. Press "Start watching".
+  3. Press "Save" to keep it in your passcode-locked vault (optional).
+  4. Press "Start watching".
 
-WHERE YOUR SETTINGS GO
-  Your settings are saved in GetHubWatchDog-settings.json, in the same
-  folder as GetHubWatchDog.exe - on your stick, never on the PC.
+SAVED REPOS AND YOUR PASSCODE
+  Fill in a repository, branch and token, then press "Save". The first
+  time, you choose a passcode (at least 4 digits). Save as many repos as
+  you like and pick them from "Saved repos" at the top.
 
-  On a shared or library PC, it is fine to leave "Remember token on
-  this drive" ticked: the token stays on your stick. Untick it if you
-  would rather paste the token every time (for example if you might
-  lose the stick). If the stick is read-only, nothing is saved at all.
+  Each time the app opens it asks for your passcode. Your repos and
+  tokens are stored encrypted in GetHubWatchDog-settings.json, next to
+  GetHubWatchDog.exe - on your stick, never on the PC.
 
-  Anyone who has your stick can read the token in that settings file.
-  Use a read-only (Actions: Read-only) token, and if you lose the
-  stick, delete the token at github.com/settings/tokens.
+  10 wrong passcodes in a row erase the vault. "Forgot passcode..." also
+  erases it. Your tokens still work on GitHub - just paste them again.
+
+  A 4-digit passcode stops someone who finds your stick and opens the
+  app. Someone who copies the file and runs a cracking program could
+  still get in within hours, because 4 digits is only 10,000 guesses.
+  For more protection use a longer passcode (6-8 digits or a few
+  words). Either way, use read-only tokens, and if you lose the stick,
+  delete the tokens at github.com/settings/tokens.
 
 LIBRARY / WORK PCs
   Some public PCs block programs run from USB sticks. If it won't
