@@ -48,3 +48,12 @@ FEATURES
   - Alarm and pop-up when a build finishes; publish-only failures shown
     separately from real compile failures
   - "View log" / double-click a job to read its full log and errors
+
+LICENSE
+  Copyright (c) 2026 WhiteBoyStudios
+  https://github.com/WhiteBoyStudios/GetHub-WatchDog
+  Free for personal and other noncommercial use under the PolyForm
+  Noncommercial License 1.0.0:
+  https://polyformproject.org/licenses/noncommercial/1.0.0
+  Selling it or using it for commercial purposes requires written
+  permission from WhiteBoyStudios.
