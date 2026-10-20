@@ -12,7 +12,7 @@ START
   It can take a few seconds to open from a slow USB stick.
 
 SET UP
-  1. Repository: owner/name, e.g. WhiteBoyStudios/ClyFiOS
+  1. Repository: owner/name, e.g. octocat/Hello-World
      (or paste the repository's GitHub address).
   2. Token: paste your GitHub token (starts with github_pat_ or ghp_).
      It needs "Actions: Read-only" permission.

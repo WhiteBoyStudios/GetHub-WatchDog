@@ -1,6 +1,24 @@
 # GetHub WatchDog
 
-A desktop app that watches your GitHub Actions builds live — any language, any compiler (gcc, clang, MSVC, javac, rustc, Go, .NET, Node…), because it watches the build service itself rather than a specific compiler.
+**Watch your GitHub Actions builds live on your PC — and get an alarm the moment they finish.**
+
+Works with any language and any compiler (gcc, clang, MSVC, javac, rustc, Go, .NET, Node…), because it watches GitHub's build service itself. Free and open source.
+
+![GetHub WatchDog watching a build](docs/screenshot.png)
+
+## Download (Windows)
+
+**[⬇ Download GetHubWatchDog.exe](https://github.com/WhiteBoyStudios/GetHub-WatchDog/releases/latest/download/GetHubWatchDog.exe)** — one file, nothing to install, runs from a USB stick.
+Or get the [zip with instructions](https://github.com/WhiteBoyStudios/GetHub-WatchDog/releases/latest/download/GetHubWatchDog-Portable.zip).
+
+The first time you run it, Windows may say *"Windows protected your PC"* because the app isn't code-signed: click **More info → Run anyway**.
+
+On Mac or Linux, use the Python version: download [`gethub_watchdog.py`](gethub_watchdog.py) and run `python3 gethub_watchdog.py` (needs Python 3.9+ with Tk).
+
+## Quick start
+1. Create a GitHub token at [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new): pick your repository and set **Actions** to **Read-only**. (Public repos work without a token, but only update every 2 minutes.)
+2. Open GetHub WatchDog, type the repository as `owner/name`, paste the token, press **Start watching**.
+3. Press **Save** to keep it in your passcode-locked vault for next time.
 
 ## What it shows
 - **Recent builds** for the repository, with pass / fail / running status
@@ -50,7 +68,7 @@ Without a token GitHub allows only 60 requests an hour, so the app checks every 
 
 Create one at GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained token**, give it access to your repository with **Actions: Read-only** permission, and paste it into the Token box. For private repositories a token is required.
 
-Your settings (including the token) are saved on your computer in `~/.gethub_watchdog.json` (on Windows: `C:\Users\<you>\.gethub_watchdog.json`).
+Tokens are only ever saved inside the passcode-locked vault. Other settings are saved in `~/.gethub_watchdog.json` when running from Python (or next to the .exe for the portable version).
 
 ## Make a Windows .exe (optional)
 Double-click `build_windows_exe.bat`. It installs PyInstaller and produces `dist\GetHubWatchDog.exe`, which runs without opening a console window.
@@ -59,3 +77,14 @@ Double-click `build_windows_exe.bat`. It installs PyInstaller and produces `dist
 - **Follow newest** keeps the view on the latest running build. Click any build in the list to pin it instead.
 - **Test alarm** plays the sound so you can check your volume.
 - **Branch** limits the list to one branch (leave blank for all).
+
+## Privacy
+GetHub WatchDog talks only to GitHub (`api.github.com`) using your own token. It has no servers, accounts, analytics or tracking. Your settings stay in one file on your own computer or USB stick.
+
+## Contributing
+Bug reports and ideas are welcome in [Issues](https://github.com/WhiteBoyStudios/GetHub-WatchDog/issues). Pull requests too: change `gethub_watchdog.py` and the Windows `.exe` rebuilds itself automatically.
+
+## License
+[MIT](LICENSE) — free to use, copy and modify.
+
+GetHub WatchDog is an independent project and is not affiliated with or endorsed by GitHub, Inc.

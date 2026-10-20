@@ -609,7 +609,7 @@ class App:
         pb.pack(fill="x")
         ttk.Label(pb, text="Saved repos", style="H.TLabel").pack(side="left")
         self.prof_v = tk.StringVar()
-        self.prof_cb = ttk.Combobox(pb, textvariable=self.prof_v, state="readonly", width=44)
+        self.prof_cb = ttk.Combobox(pb, textvariable=self.prof_v, state="readonly", width=38)
         self.prof_cb.pack(side="left", padx=(8, 8))
         self.prof_cb.bind("<<ComboboxSelected>>", self.on_profile)
         self.vbtn = {}
@@ -706,10 +706,11 @@ class App:
         self.prog.pack(fill="x", pady=(10, 2))
         prow = ttk.Frame(hdr)
         prow.pack(fill="x")
-        self.prog_l = ttk.Label(prow, text="", style="Cap.TLabel")
-        self.prog_l.pack(side="left")
         ttk.Button(prow, text="Open on GitHub ↗", command=self.open_run).pack(side="right")
         ttk.Button(prow, text="View log", command=self.open_log).pack(side="right", padx=(0, 6))
+        self.prog_l = ttk.Label(prow, text="", style="Cap.TLabel")   # packed last so buttons always fit
+        self.prog_l.pack(side="left", fill="x", expand=True)
+        self.prog_l.bind("<Configure>", lambda e: self.prog_l.config(wraplength=max(e.width - 4, 150)))
 
         # --- right: timeline
         tlf = ttk.LabelFrame(right, text=" Build flow ", padding=4)
@@ -819,7 +820,7 @@ class App:
         elif self.prof_v.get() not in labels:
             self.prof_v.set("")
         if not has_vault:
-            txt = "Press Save to keep this repo and token in a passcode-locked vault."
+            txt = "Press Save to keep it."
         elif not unlocked:
             txt = "Locked."
         else:
@@ -1172,8 +1173,8 @@ class App:
                 remaining = "any moment"
                 done_at = f"+{fmt_dur(-rem)} over"
                 frac = 0.99
-            note = (f"{int(frac * 100)}% · estimate from the median of the last {hist.get('count')} "
-                    f"successful build(s) of this workflow · {jobs_done}/{len(jobs)} jobs done")
+            note = (f"{int(frac * 100)}% · {jobs_done}/{len(jobs)} jobs done · estimate based on the "
+                    f"last {hist.get('count')} successful build(s)")
         else:
             remaining, done_at, frac = "learning…", "—", job_frac
             note = (f"{jobs_done}/{len(jobs)} jobs done · no successful past builds of this workflow yet, "
