@@ -16,6 +16,7 @@ Only uses the Python standard library (tkinter + urllib). Run with:
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import median
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 APP = "GetHub WatchDog"
 API = "https://api.github.com"
@@ -170,6 +171,57 @@ def item_span(obj):
     return s, e
 
 
+# ----------------------------------------------------------------- build logs
+TS_RE = re.compile(r"^\ufeff?(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?Z ?")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+ERR_RE = re.compile(r"##\[error\]|\b(fatal )?error\b\s*([A-Z]+\d+)?\s*:|\bFAILED\b|undefined reference"
+                    r"|unresolved external|Traceback \(most recent|exit code [1-9]|\bpanic:", re.I)
+WARN_RE = re.compile(r"##\[warning\]|\bwarning\b\s*([A-Z]+\d+)?\s*:", re.I)
+MAX_SHOWN = 30000
+
+
+def parse_log(text):
+    """GitHub job log -> list of (line number, time, text, tag)."""
+    out, last = [], None
+    for i, raw in enumerate(text.splitlines(), 1):
+        m = TS_RE.match(raw)
+        if m:
+            last = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            line = raw[m.end():]
+        else:
+            line = raw.lstrip("\ufeff")
+        line = ANSI_RE.sub("", line)
+        tag = None
+        if line.startswith("##[endgroup]"):
+            continue
+        if line.startswith("##[group]"):
+            line, tag = "▾ " + line[9:], "group"
+        elif line.startswith("##[error]"):
+            line, tag = "✖ " + line[9:], "err"
+        elif line.startswith("##[warning]"):
+            line, tag = "⚠ " + line[11:], "warn"
+        elif line.startswith("##[command]"):
+            line, tag = "$ " + line[11:], "cmd"
+        elif line.startswith(("##[debug]", "##[notice]")):
+            line, tag = line.split("]", 1)[1], "cmd"
+        elif ERR_RE.search(line):
+            tag = "err"
+        elif WARN_RE.search(line):
+            tag = "warn"
+        out.append((i, last, line, tag))
+    return out
+
+
+def step_lines(parsed, step):
+    """The part of a job log written while one step was running."""
+    s = parse_t(step.get("started_at"))
+    if not s:
+        return []
+    e = parse_t(step.get("completed_at")) or now()
+    lo, hi = s - timedelta(seconds=1), e + timedelta(seconds=1)
+    return [p for p in parsed if p[1] and lo <= p[1] <= hi]
+
+
 def load_cfg():
     try:
         with open(CFG_PATH, "r", encoding="utf-8") as f:
@@ -224,6 +276,43 @@ class GitHub:
             raise RuntimeError(f"GitHub {e.code}: {msg}") from None
         except urllib.error.URLError as e:
             raise RuntimeError(f"Network error: {e.reason}") from None
+
+    def get_text(self, path):
+        """Download a plain-text resource such as a job log."""
+        req = urllib.request.Request(API + path, headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "gethub-watchdog",
+        })
+        if self.token:
+            req.add_header("Authorization", "Bearer " + self.token)
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            with opener.open(req, timeout=30) as r:
+                return r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            loc = e.headers.get("Location") if e.headers else None
+            if e.code in (301, 302, 303, 307, 308) and loc:
+                try:
+                    dl = urllib.request.Request(loc, headers={"User-Agent": "gethub-watchdog"})
+                    with urllib.request.urlopen(dl, timeout=120) as r:
+                        return r.read().decode("utf-8", "replace")
+                except urllib.error.URLError as e2:
+                    raise RuntimeError(f"Couldn't download the log: {getattr(e2, 'reason', e2)}") from None
+            msg = {
+                401: "Your token was rejected.",
+                403: "Your token can't read build logs. Give it  Actions: Read-only  permission.",
+                404: "GitHub has no log for this job yet — logs appear once the job has finished.",
+                410: "This log has expired. GitHub only keeps build logs for a limited time.",
+            }.get(e.code, f"GitHub error {e.code}.")
+            raise RuntimeError(msg) from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Network error: {e.reason}") from None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 class Watcher(threading.Thread):
@@ -407,6 +496,7 @@ class App:
         self.kws = [k.lower() for k in self.cfg.get("publish_keywords", PUBLISH_KEYWORDS) if k]
         self.shown_run = None
         self.auto_opened = set()
+        self.log_cache = {}         # job id -> parsed log
         self.last_ok = None
         self.build_ui()
         root.after(200, self.drain)
@@ -514,6 +604,7 @@ class App:
         self.prog_l = ttk.Label(prow, text="", style="Cap.TLabel")
         self.prog_l.pack(side="left")
         ttk.Button(prow, text="Open on GitHub ↗", command=self.open_run).pack(side="right")
+        ttk.Button(prow, text="View log", command=self.open_log).pack(side="right", padx=(0, 6))
 
         # --- right: timeline
         tlf = ttk.LabelFrame(right, text=" Build flow ", padding=4)
@@ -526,7 +617,7 @@ class App:
         self.canvas.bind("<Configure>", lambda _e: self.draw_timeline())
 
         # --- right: jobs & steps
-        jf = ttk.LabelFrame(right, text=" Jobs & steps ", padding=4)
+        jf = ttk.LabelFrame(right, text=" Jobs & steps  (double-click a job or step to see its log) ", padding=4)
         jf.pack(fill="both", expand=True, padx=(10, 0))
         self.jobs_tv = ttk.Treeview(jf, columns=("status", "start", "dur", "eta"), show="tree headings")
         self.jobs_tv.heading("#0", text="Job / step")
@@ -539,6 +630,7 @@ class App:
         self.jobs_tv.configure(yscrollcommand=jsb.set)
         jsb.pack(side="right", fill="y")
         self.jobs_tv.pack(fill="both", expand=True)
+        self.jobs_tv.bind("<Double-1>", self.on_job_dclick)
         for k, c in COLORS.items():
             self.jobs_tv.tag_configure(k, foreground=c)
 
@@ -604,6 +696,33 @@ class App:
         self.watcher.pinned = int(iid)
         self.watcher.poke()
         self.set_status("Loading selected build…")
+
+    def current_token(self):
+        return "".join(self.token_v.get().split())
+
+    def on_job_dclick(self, e):
+        iid = self.jobs_tv.identify_row(e.y)
+        if not iid.startswith("j"):
+            return
+        jid, _, sno = iid[1:].partition("s")
+        self.open_log(int(jid), int(sno) if sno else None)
+        return "break"
+
+    def open_log(self, job_id=None, step_no=None, run=None, jobs=None):
+        d = self.data
+        if not d:
+            return
+        run = run or d.get("target")
+        if not run:
+            return
+        if jobs is None:
+            jobs = (d.get("done_jobs") or {}).get(run["id"])
+            if jobs is None and d.get("target") and d["target"]["id"] == run["id"]:
+                jobs = d.get("jobs")
+        if not jobs:
+            messagebox.showinfo(APP, "This build has no jobs with logs yet.")
+            return
+        LogWindow(self, d["repo"], run, jobs, job_id, step_no)
 
     def open_run(self):
         t = self.data and self.data.get("target")
@@ -965,6 +1084,10 @@ class App:
         btns = ttk.Frame(w, padding=(16, 0, 16, 16))
         btns.pack()
         ttk.Button(btns, text="Stop alarm", command=close).pack(side="left", padx=6)
+        if kind != "pass":
+            jobs = ((self.data or {}).get("done_jobs") or {}).get(r["id"])
+            ttk.Button(btns, text="Show failure log",
+                       command=lambda: (close(), self.open_log(run=r, jobs=jobs))).pack(side="left", padx=6)
         ttk.Button(btns, text="Open on GitHub ↗",
                    command=lambda: (webbrowser.open(r["html_url"]), close())).pack(side="left", padx=6)
         w.protocol("WM_DELETE_WINDOW", close)
@@ -980,6 +1103,276 @@ class App:
             w.focus_force()
         except tk.TclError:
             pass
+
+
+class LogWindow:
+    """Shows the GitHub log for a job, focused on the step that failed."""
+
+    def __init__(self, app, repo, run, jobs, job_id=None, step_no=None):
+        self.app, self.repo, self.run = app, repo, run
+        self.cache = app.log_cache
+        self.gh = GitHub(app.current_token())
+        self.q = queue.Queue()
+        self.step_no = step_no
+        self.sel = []
+        self.list_lines = []
+        failed = [j for j in jobs if j.get("conclusion") in BAD]
+        self.jobs = failed + [j for j in jobs if j not in failed]
+        self.job = next((j for j in self.jobs if j["id"] == job_id), None) or self.jobs[0]
+
+        w = self.w = tk.Toplevel(app.root)
+        w.title(f"{APP} — log — {run.get('name')} #{run.get('run_number')}")
+        w.geometry("1150x760")
+        w.minsize(760, 480)
+        mono = ("Consolas", 10) if sys.platform.startswith("win") else \
+               ("Menlo", 11) if sys.platform == "darwin" else ("DejaVu Sans Mono", 10)
+
+        bar = ttk.Frame(w, padding=(10, 8, 10, 4))
+        bar.pack(fill="x")
+        ttk.Label(bar, text="Job").pack(side="left")
+        self.labels = {}
+        for j in self.jobs:
+            mark = "✖ " if j.get("conclusion") in BAD else "✔ " if j.get("conclusion") == "success" else "• "
+            self.labels[mark + j["name"]] = j
+        self.job_v = tk.StringVar()
+        cb = ttk.Combobox(bar, textvariable=self.job_v, values=list(self.labels), state="readonly", width=44)
+        cb.pack(side="left", padx=(6, 14))
+        cb.bind("<<ComboboxSelected>>", self.on_job)
+        self.mode = tk.StringVar(value="job")   # full job log by default
+        ttk.Radiobutton(bar, text="Whole job log", value="job", variable=self.mode,
+                        command=self.render).pack(side="left")
+        ttk.Radiobutton(bar, text="Failed step only", value="step", variable=self.mode,
+                        command=self.render).pack(side="left", padx=(6, 14))
+        self.only_err = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Errors & warnings only", variable=self.only_err,
+                        command=self.render).pack(side="left")
+        ttk.Button(bar, text="Open on GitHub ↗", command=self.open_gh).pack(side="right")
+        ttk.Button(bar, text="Save log…", command=self.save).pack(side="right", padx=6)
+
+        bar2 = ttk.Frame(w, padding=(10, 0, 10, 6))
+        bar2.pack(fill="x")
+        self.find_v = tk.StringVar()
+        fe = ttk.Entry(bar2, textvariable=self.find_v, width=30)
+        fe.pack(side="left")
+        fe.bind("<Return>", lambda _e: self.find())
+        ttk.Button(bar2, text="Find", command=self.find).pack(side="left", padx=(6, 14))
+        self.info = ttk.Label(bar2, text="", style="Cap.TLabel")
+        self.info.pack(side="left")
+
+        sf = ttk.LabelFrame(w, text=" What went wrong  (click a line to jump to it) ", padding=4)
+        sf.pack(fill="x", padx=10)
+        self.summary = tk.Listbox(sf, height=7, font=mono, activestyle="none", borderwidth=0,
+                                  highlightthickness=0, selectbackground="#ddf4ff", selectforeground="black")
+        ssb = ttk.Scrollbar(sf, orient="vertical", command=self.summary.yview)
+        self.summary.configure(yscrollcommand=ssb.set)
+        ssb.pack(side="right", fill="y")
+        self.summary.pack(fill="x", expand=True)
+        self.summary.bind("<<ListboxSelect>>", self.on_summary)
+
+        lf = ttk.Frame(w, padding=(10, 6, 10, 10))
+        lf.pack(fill="both", expand=True)
+        self.text = tk.Text(lf, wrap="none", font=mono, bg="#fbfcfd", fg="#1f2328",
+                            borderwidth=1, relief="solid", undo=False)
+        vs = ttk.Scrollbar(lf, orient="vertical", command=self.text.yview)
+        hs = ttk.Scrollbar(lf, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+        vs.pack(side="right", fill="y")
+        hs.pack(side="bottom", fill="x")
+        self.text.pack(fill="both", expand=True)
+        t = self.text
+        t.tag_configure("ln", foreground="#8c959f")
+        t.tag_configure("err", foreground="#cf222e", background="#ffebe9")
+        t.tag_configure("warn", foreground="#9a6700")
+        t.tag_configure("group", foreground="#0969da", font=mono + ("bold",))
+        t.tag_configure("cmd", foreground="#6e7781")
+        t.tag_configure("failstep", background="#fff1f0")
+        t.tag_configure("jump", background="#fff8c5")
+        t.tag_raise("err")
+        t.tag_configure("hit", background="#ffd33d")
+        t.tag_raise("jump")
+        t.tag_raise("hit")
+        t.bind("<Key>", lambda e: None if (e.state & 0x4 and e.keysym.lower() in ("c", "a")) else "break")
+
+        self.job_v.set(next(k for k, v in self.labels.items() if v is self.job))
+        self.load()
+        self.poll()
+
+    # ----- loading
+    def on_job(self, _e=None):
+        self.job = self.labels[self.job_v.get()]
+        self.step_no = None
+        self.load()
+
+    def load(self):
+        jid = self.job["id"]
+        if jid in self.cache:
+            self.render()
+            return
+        self.show_message("Downloading log from GitHub…")
+        job, gh, repo, q = self.job, self.gh, self.repo, self.q
+
+        def work():
+            try:
+                q.put((jid, parse_log(gh.get_text(f"/repos/{repo}/actions/jobs/{jid}/logs")), None))
+            except Exception as e:
+                msg = str(e)
+                if job.get("status") != "completed":
+                    msg = "This job is still running. GitHub makes its log available once the job finishes."
+                q.put((jid, None, msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def poll(self):
+        try:
+            while True:
+                jid, parsed, err = self.q.get_nowait()
+                if parsed is not None:
+                    self.cache[jid] = parsed
+                if jid == self.job["id"]:
+                    self.render() if parsed is not None else self.show_message("⚠ " + err)
+        except queue.Empty:
+            pass
+        if self.w.winfo_exists():
+            self.w.after(150, self.poll)
+
+    def show_message(self, msg):
+        self.summary.delete(0, "end")
+        self.list_lines = []
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", "\n   " + msg)
+        self.info.config(text="")
+
+    # ----- display
+    def render(self):
+        job = self.job
+        parsed = self.cache.get(job["id"])
+        if parsed is None:
+            return
+        steps = job.get("steps") or []
+        failed_steps = [s for s in steps if s.get("conclusion") in BAD]
+        focus = None
+        if self.step_no is not None:
+            focus = next((s for s in steps if s.get("number") == self.step_no), None)
+        focus = focus or (failed_steps[0] if failed_steps else None)
+        focus_lines = step_lines(parsed, focus) if focus else []
+        focus_nums = {p[0] for p in focus_lines}
+        if self.mode.get() == "step" and focus_lines:
+            sel, where = focus_lines, f"step “{focus['name']}”"
+        else:
+            sel = parsed
+            where = "whole job log" + (f" (step “{focus['name']}” shaded)" if focus_lines else "")
+        self.sel = sel
+        shown = [p for p in sel if p[3] in ("err", "warn")] if self.only_err.get() else sel
+        cut = len(shown) > MAX_SHOWN
+        if cut:
+            shown = shown[-MAX_SHOWN:]
+
+        t = self.text
+        t.delete("1.0", "end")
+        head = 1
+        if cut:
+            t.insert("end", f"   … showing the last {MAX_SHOWN:,} lines. Use Save log… for everything.\n", "cmd")
+            head = 2
+        t.insert("end", "".join(f"{n:>6}  {line}\n" for n, _ts, line, _tag in shown))
+        self.row_of = {}
+        for k, (n, _ts, _line, tag) in enumerate(shown):
+            r = head + k
+            self.row_of[n] = r
+            t.tag_add("ln", f"{r}.0", f"{r}.8")
+            if n in focus_nums and self.mode.get() == "job":
+                t.tag_add("failstep", f"{r}.0", f"{r}.end+1c")
+            if tag:
+                t.tag_add(tag, f"{r}.8", f"{r}.end")
+
+        # summary
+        sm = self.summary
+        sm.delete(0, "end")
+        self.list_lines = []
+        jt, jtag = item_status(job, self.app.kws)
+        sm.insert("end", f"{jt}   {job['name']}")
+        sm.itemconfig("end", foreground=COLORS[jtag])
+        self.list_lines.append(None)
+        for s in failed_steps:
+            ss, se = item_span(s)
+            dur = fmt_dur((se - ss).total_seconds()) if ss and se else "—"
+            stt, stag = item_status(s, self.app.kws, is_publish(job.get("name"), self.app.kws))
+            sm.insert("end", f"   {stt}   step {s.get('number')}: {s['name']}   (ran {dur})")
+            sm.itemconfig("end", foreground=COLORS[stag])
+            self.list_lines.append(("step", s.get("number")))
+        errs = [p for p in sel if p[3] == "err"]
+        for n, _ts, line, _tag in errs[:300]:
+            sm.insert("end", f"      line {n}: {line.strip()[:220]}")
+            sm.itemconfig("end", foreground=COLORS["bad"])
+            self.list_lines.append(n)
+        if not errs:
+            sm.insert("end", "      No error lines found in this part of the log — the end of the log usually says why.")
+            self.list_lines.append(None)
+        warns = sum(1 for p in sel if p[3] == "warn")
+        self.info.config(text=f"{job['name']}  ›  {where}   ·   {len(sel):,} lines   ·   "
+                              f"{len(errs)} error line(s), {warns} warning(s)")
+        first = next((p[0] for p in errs if p[0] in focus_nums), None) or (errs[0][0] if errs else None)
+        if first in self.row_of:
+            self.jump(first)
+        else:
+            t.see("end")
+
+    def jump(self, n):
+        r = self.row_of.get(n)
+        if not r:
+            return
+        t = self.text
+        t.tag_remove("jump", "1.0", "end")
+        t.tag_add("jump", f"{r}.0", f"{r}.end")
+        t.see(f"{max(r - 6, 1)}.0")
+        t.see(f"{r}.0")
+
+    def on_summary(self, _e=None):
+        cur = self.summary.curselection()
+        if not cur or cur[0] >= len(self.list_lines):
+            return
+        target = self.list_lines[cur[0]]
+        if isinstance(target, int):
+            if target not in self.row_of and self.only_err.get():
+                self.only_err.set(False)
+                self.render()
+            self.jump(target)
+        elif target and target[0] == "step":
+            self.step_no = target[1]
+            self.render()
+
+    def find(self):
+        q = self.find_v.get()
+        t = self.text
+        t.tag_remove("hit", "1.0", "end")
+        if not q:
+            return
+        start = t.index("insert +1c")
+        pos = t.search(q, start, nocase=True, stopindex="end") or t.search(q, "1.0", nocase=True, stopindex=start)
+        if not pos:
+            self.info.config(text=f"“{q}” not found")
+            return
+        end = f"{pos}+{len(q)}c"
+        t.tag_add("hit", pos, end)
+        t.mark_set("insert", pos)
+        t.see(pos)
+
+    def open_gh(self):
+        url = self.job.get("html_url") or self.run.get("html_url")
+        if url:
+            webbrowser.open(url)
+
+    def save(self):
+        parsed = self.cache.get(self.job["id"])
+        if not parsed:
+            return
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{self.run.get('name')}-{self.run.get('run_number')}-{self.job['name']}")
+        path = filedialog.asksaveasfilename(parent=self.w, defaultextension=".log", initialfile=safe + ".log",
+                                            filetypes=[("Log files", "*.log"), ("Text files", "*.txt")])
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(line for _n, _ts, line, _tag in parsed) + "\n")
+        self.info.config(text=f"Saved the whole job log to {path}")
 
 
 def main():
