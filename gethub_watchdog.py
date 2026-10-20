@@ -34,7 +34,20 @@ from tkinter import filedialog, messagebox, ttk
 
 APP = "GetHub WatchDog"
 API = "https://api.github.com"
-CFG_PATH = os.path.join(os.path.expanduser("~"), ".gethub_watchdog.json")
+VERSION = "1.3"
+
+
+def _app_dir():
+    if getattr(sys, "frozen", False):          # running as the portable .exe
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+# Portable mode: the .exe (or a copy of the script with a settings file beside it)
+# keeps its settings next to itself, e.g. on a USB stick, and never writes to the PC.
+LOCAL_CFG = os.path.join(_app_dir(), "GetHubWatchDog-settings.json")
+PORTABLE = getattr(sys, "frozen", False) or os.path.exists(LOCAL_CFG)
+CFG_PATH = LOCAL_CFG if PORTABLE else os.path.join(os.path.expanduser("~"), ".gethub_watchdog.json")
 
 COLORS = {
     "ok": "#1a7f37",     # passed
@@ -231,11 +244,16 @@ def load_cfg():
 
 
 def save_cfg(cfg):
+    """Returns False if the settings could not be written (e.g. read-only drive)."""
+    data = dict(cfg)
+    if not data.get("remember_token", True):
+        data.pop("token", None)
     try:
         with open(CFG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
+            json.dump(data, f, indent=2)
+        return True
     except Exception:
-        pass
+        return False
 
 
 # ----------------------------------------------------------------- GitHub API
@@ -528,6 +546,7 @@ class App:
         self.interval_v = tk.StringVar(value=str(self.cfg.get("interval", 5)))
         self.follow_v = tk.BooleanVar(value=True)
         self.sound_v = tk.BooleanVar(value=self.cfg.get("sound", True))
+        self.keep_token_v = tk.BooleanVar(value=self.cfg.get("remember_token", True))
 
         fields = [
             ("Repository (owner/name or URL)", self.repo_v, 30, None),
@@ -546,10 +565,15 @@ class App:
         self.start_btn.grid(row=1, column=4, padx=(0, 12))
         ttk.Checkbutton(top, text="Alarm sound", variable=self.sound_v).grid(row=1, column=5, padx=(0, 8))
         ttk.Button(top, text="Test alarm", command=self.test_alarm).grid(row=1, column=6)
+        ttk.Checkbutton(top, text="Remember token" + (" on this drive" if PORTABLE else ""),
+                        variable=self.keep_token_v, command=self.on_keep_token).grid(
+            row=2, column=2, sticky="w", pady=(3, 0))
 
         # --- status bar (packed before the panes so it stays visible)
         self.sb = ttk.Label(r, anchor="w", padding=(10, 3), style="Cap.TLabel",
-                            text="Enter a repository and press Start.")
+                            text="Enter a repository and press Start."
+                                 + ("   ·   Portable mode: settings are saved next to the app, not on this PC."
+                                    if PORTABLE else ""))
         self.sb.pack(fill="x", side="bottom")
 
         pw = ttk.Panedwindow(r, orient="horizontal")
@@ -665,6 +689,7 @@ class App:
         self.interval_v.set(str(iv))
         self.repo_v.set(repo)
         self.cfg.update(repo=repo, branch=self.branch_v.get().strip(), token=token,
+                        remember_token=self.keep_token_v.get(),
                         interval=iv, sound=self.sound_v.get(), publish_keywords=self.kws)
         save_cfg(self.cfg)
 
@@ -696,6 +721,10 @@ class App:
         self.watcher.pinned = int(iid)
         self.watcher.poke()
         self.set_status("Loading selected build…")
+
+    def on_keep_token(self):
+        self.cfg["remember_token"] = self.keep_token_v.get()
+        save_cfg(self.cfg)
 
     def current_token(self):
         return "".join(self.token_v.get().split())
@@ -739,7 +768,7 @@ class App:
         self.alarm.stop()
         if self.watcher:
             self.watcher.stop()
-        self.cfg.update(sound=self.sound_v.get())
+        self.cfg.update(sound=self.sound_v.get(), remember_token=self.keep_token_v.get())
         save_cfg(self.cfg)
         self.root.destroy()
 
@@ -1383,7 +1412,19 @@ def main():
         except Exception:
             pass
     root = tk.Tk()
-    App(root)
+    try:
+        root.iconbitmap(os.path.join(getattr(sys, "_MEIPASS", _app_dir()), "watchdog.ico"))
+    except Exception:
+        pass
+    app = App(root)
+    if "--selftest" in sys.argv:              # used by the automated Windows build check
+        def check():
+            out = os.path.join(_app_dir(), "selftest-result.txt")
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(f"ok {VERSION} portable={PORTABLE} cfg={CFG_PATH} sound={bool(play_once)}\n")
+            root.destroy()
+        root.after(1500, check)
+        app.sound_v.set(False)
     root.mainloop()
 
 

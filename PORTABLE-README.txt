@@ -1,0 +1,43 @@
+GetHub WatchDog - portable version
+==================================
+
+Watches your GitHub Actions builds live, shows time to completion,
+and sounds an alarm when a build finishes. No install and no Python
+needed - it runs straight from a USB stick or any folder.
+
+START
+  Double-click GetHubWatchDog.exe.
+  First time on a PC, Windows may say "Windows protected your PC".
+  Click "More info", then "Run anyway". (The app isn't code-signed.)
+  It can take a few seconds to open from a slow USB stick.
+
+SET UP
+  1. Repository: owner/name, e.g. WhiteBoyStudios/ClyFiOS
+     (or paste the repository's GitHub address).
+  2. Token: paste your GitHub token (starts with github_pat_ or ghp_).
+     It needs "Actions: Read-only" permission.
+  3. Press "Start watching".
+
+WHERE YOUR SETTINGS GO
+  Your settings are saved in GetHubWatchDog-settings.json, in the same
+  folder as GetHubWatchDog.exe - on your stick, never on the PC.
+
+  On a shared or library PC, it is fine to leave "Remember token on
+  this drive" ticked: the token stays on your stick. Untick it if you
+  would rather paste the token every time (for example if you might
+  lose the stick). If the stick is read-only, nothing is saved at all.
+
+  Anyone who has your stick can read the token in that settings file.
+  Use a read-only (Actions: Read-only) token, and if you lose the
+  stick, delete the token at github.com/settings/tokens.
+
+LIBRARY / WORK PCs
+  Some public PCs block programs run from USB sticks. If it won't
+  start at all, that PC doesn't allow it - there's nothing to fix in
+  the app. The alarm sound needs the PC's speakers or headphones on.
+
+FEATURES
+  - Live jobs and steps, elapsed time, time to completion, "done at" time
+  - Alarm and pop-up when a build finishes; publish-only failures shown
+    separately from real compile failures
+  - "View log" / double-click a job to read its full log and errors

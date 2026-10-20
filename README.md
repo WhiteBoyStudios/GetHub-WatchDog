@@ -19,7 +19,10 @@ The job list at the top lets you open the log of any other job in the same build
 
 Time estimates come from the median of the last 10 successful builds of the same workflow, so they appear once a workflow has passed at least once.
 
-## Run it
+## Portable version (no Python needed)
+For a USB stick, a laptop while traveling, or a library PC: open the repository's **Releases** page, download **GetHubWatchDog-Portable.zip**, unzip it anywhere (e.g. your USB stick) and double-click **GetHubWatchDog.exe**. Nothing is installed and nothing is written to the PC — settings, including the token if "Remember token on this drive" is ticked, are kept in `GetHubWatchDog-settings.json` next to the .exe. The portable app is rebuilt and test-launched on Windows automatically each time the app changes. If Windows says "Windows protected your PC", click **More info → Run anyway** (the app isn't code-signed).
+
+## Run it from Python
 1. Install Python 3.9 or newer from https://python.org (on Windows, tick "Add Python to PATH"; tkinter is included).
 2. Double-click `gethub_watchdog.py`, or run `python gethub_watchdog.py`.
 3. Enter the repository as `owner/name` (or paste its GitHub URL) and press **Start watching**.
