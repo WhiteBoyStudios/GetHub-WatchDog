@@ -19,8 +19,17 @@ The job list at the top lets you open the log of any other job in the same build
 
 Time estimates come from the median of the last 10 successful builds of the same workflow, so they appear once a workflow has passed at least once.
 
+## Two versions
+
+| Version | Where | Needs |
+|---|---|---|
+| **Standalone (portable)** | [`portable/GetHubWatchDog.exe`](portable/) in this repository, or **GetHubWatchDog-Portable.zip** on the [Releases](../../releases/latest) page | Windows only — nothing to install |
+| **Python** | [`gethub_watchdog.py`](gethub_watchdog.py) | Python 3.9+ (Windows, Mac or Linux) |
+
+Both are the same app. The standalone version is rebuilt from `gethub_watchdog.py` and test-launched on Windows automatically every time the app changes, so the two always match.
+
 ## Portable version (no Python needed)
-For a USB stick, a laptop while traveling, or a library PC: open the repository's **Releases** page, download **GetHubWatchDog-Portable.zip**, unzip it anywhere (e.g. your USB stick) and double-click **GetHubWatchDog.exe**. Nothing is installed and nothing is written to the PC — settings, including the token if "Remember token on this drive" is ticked, are kept in `GetHubWatchDog-settings.json` next to the .exe. The portable app is rebuilt and test-launched on Windows automatically each time the app changes. If Windows says "Windows protected your PC", click **More info → Run anyway** (the app isn't code-signed).
+For a USB stick, a laptop while traveling, or a library PC: download `portable/GetHubWatchDog.exe` from this repository (or **GetHubWatchDog-Portable.zip** from the Releases page), put it anywhere (e.g. your USB stick) and double-click it. Nothing is installed and nothing is written to the PC — settings, including the token if "Remember token on this drive" is ticked, are kept in `GetHubWatchDog-settings.json` next to the .exe. The portable app is rebuilt and test-launched on Windows automatically each time the app changes. If Windows says "Windows protected your PC", click **More info → Run anyway** (the app isn't code-signed).
 
 ## Run it from Python
 1. Install Python 3.9 or newer from https://python.org (on Windows, tick "Add Python to PATH"; tkinter is included).
