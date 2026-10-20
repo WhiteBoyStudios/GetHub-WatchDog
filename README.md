@@ -2,7 +2,7 @@
 
 **Watch your GitHub Actions builds live on your PC — and get an alarm the moment they finish.**
 
-Works with any language and any compiler (gcc, clang, MSVC, javac, rustc, Go, .NET, Node…), because it watches GitHub's build service itself. Free and open source.
+Works with any language and any compiler (gcc, clang, MSVC, javac, rustc, Go, .NET, Node…), because it watches GitHub's build service itself. Free for personal and noncommercial use, with the full source code here.
 
 ![GetHub WatchDog watching a build](docs/screenshot.png)
 
@@ -82,9 +82,14 @@ Double-click `build_windows_exe.bat`. It installs PyInstaller and produces `dist
 GetHub WatchDog talks only to GitHub (`api.github.com`) using your own token. It has no servers, accounts, analytics or tracking. Your settings stay in one file on your own computer or USB stick.
 
 ## Contributing
-Bug reports and ideas are welcome in [Issues](https://github.com/WhiteBoyStudios/GetHub-WatchDog/issues). Pull requests too: change `gethub_watchdog.py` and the Windows `.exe` rebuilds itself automatically.
+Bug reports and ideas are welcome in [Issues](https://github.com/WhiteBoyStudios/GetHub-WatchDog/issues). Pull requests too: change `gethub_watchdog.py` and the Windows `.exe` rebuilds itself automatically. By submitting a contribution you agree that WhiteBoyStudios may use it under this project's license and in its own commercial versions of GetHub WatchDog.
 
 ## License
-[MIT](LICENSE) — free to use, copy and modify.
+**Free for noncommercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+
+- ✔ You may use it, read and change the code, and share it (with the license) for personal, educational, hobby, research, charity or government use, free of charge.
+- ✖ You may not sell it or use it for commercial purposes, including selling modified versions or building paid products from it, without written permission from WhiteBoyStudios.
+
+Copyright © 2026 WhiteBoyStudios. All commercial rights are reserved by WhiteBoyStudios.
 
 GetHub WatchDog is an independent project and is not affiliated with or endorsed by GitHub, Inc.

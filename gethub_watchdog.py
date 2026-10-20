@@ -11,6 +11,11 @@ A desktop app that watches GitHub Actions builds in real time:
 
 Only uses the Python standard library (tkinter + urllib). Run with:
     python gethub_watchdog.py
+
+Required Notice: Copyright (c) 2026 WhiteBoyStudios (https://github.com/WhiteBoyStudios/GetHub-WatchDog)
+Licensed under the PolyForm Noncommercial License 1.0.0:
+https://polyformproject.org/licenses/noncommercial/1.0.0
+Free for noncommercial use. Commercial use requires permission from WhiteBoyStudios.
 """
 
 import base64

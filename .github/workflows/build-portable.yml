@@ -9,6 +9,7 @@ on:
       - gethub_watchdog.py
       - watchdog.ico
       - PORTABLE-README.txt
+      - LICENSE.md
       - .github/workflows/build-portable.yml
   workflow_dispatch:
 
@@ -42,6 +43,7 @@ jobs:
         New-Item -ItemType Directory GetHubWatchDog-Portable | Out-Null
         Copy-Item dist\GetHubWatchDog.exe GetHubWatchDog-Portable\
         Copy-Item PORTABLE-README.txt "GetHubWatchDog-Portable\READ ME FIRST.txt"
+        Copy-Item LICENSE.md GetHubWatchDog-Portable\LICENSE.md
         Compress-Archive -Path GetHubWatchDog-Portable -DestinationPath GetHubWatchDog-Portable.zip
         Get-ChildItem GetHubWatchDog-Portable, GetHubWatchDog-Portable.zip
     - name: Update the portable folder in the repository
@@ -51,6 +53,7 @@ jobs:
         New-Item -ItemType Directory -Force portable | Out-Null
         Copy-Item dist\GetHubWatchDog.exe portable\ -Force
         Copy-Item PORTABLE-README.txt "portable\READ ME FIRST.txt" -Force
+        Copy-Item LICENSE.md portable\LICENSE.md -Force
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         git add portable
@@ -74,5 +77,6 @@ jobs:
         $notes = "Portable Windows version of GetHub WatchDog $ver. No Python or install needed.`n`n" +
                  "Download **GetHubWatchDog-Portable.zip**, unzip it onto your USB stick (or any folder) and double-click **GetHubWatchDog.exe**. " +
                  "Settings are saved next to the app, not on the PC.`n`n" +
-                 "If Windows shows 'Windows protected your PC', click **More info** then **Run anyway** (the app is not code-signed)."
+                 "If Windows shows 'Windows protected your PC', click **More info** then **Run anyway** (the app is not code-signed).`n`n" +
+                 "Free for noncommercial use under the [PolyForm Noncommercial License 1.0.0](https://github.com/WhiteBoyStudios/GetHub-WatchDog/blob/main/LICENSE.md). Commercial use requires permission from WhiteBoyStudios."
         gh release create $tag GetHubWatchDog-Portable.zip dist\GetHubWatchDog.exe --target ${{ github.sha }} --title "GetHub WatchDog $ver portable (build ${{ github.run_number }})" --notes $notes --latest
